@@ -1,0 +1,22 @@
+# Secrets and machine-local files (each version folder also has its own .gitignore)
+.env
+*.tgz
+*.zip
+config.yaml
+board_config.yaml
+
+# Pictures of people: snapshots, test frames, anything copied over by hand
+snapshots/
+*.jpg
+*.jpeg
+*.png
+
+# Models are exported locally (see README) and are large
+models/*.onnx
+models/*.pt
+
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

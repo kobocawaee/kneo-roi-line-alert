@@ -1,0 +1,13 @@
+.env
+config.yaml
+snapshots/
+models/*.onnx
+models/*.pt
+roi_preview.jpg
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+board_config.yaml
+camera_test.jpg
+alert_*.jpg

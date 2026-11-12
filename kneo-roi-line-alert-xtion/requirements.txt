@@ -1,0 +1,7 @@
+# OpenCV 5 moved the HOG people detector out of the main package; stay on 4.x.
+opencv-python>=4.8,<5
+numpy>=1.24
+requests>=2.31
+PyYAML>=6.0
+# Only needed for camera.source: openni2 (Xtion / PrimeSense); also needs libOpenNI2.so
+openni>=2.3

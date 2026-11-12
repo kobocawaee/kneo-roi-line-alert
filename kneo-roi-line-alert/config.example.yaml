@@ -1,0 +1,37 @@
+# 複製成 config.yaml 再修改：cp config.example.yaml config.yaml
+# LINE 的 token / 接收者 ID 放在 .env，不要寫在這裡。
+
+camera:
+  source: 0                  # USB webcam 編號（/dev/video0 = 0）；也可填影片檔路徑或 rtsp://... 網址
+  width: 640
+  height: 480
+  process_every_n_frames: 2  # 每 N 張影格做一次偵測，Pi 上可調大以省 CPU
+  reconnect_delay_sec: 3
+
+detector:
+  type: hog                  # hog（免模型、較不準）或 yolo_onnx（需 models/yolov8n.onnx）
+  model_path: models/yolov8n.onnx
+  input_size: 640            # 要和匯出 ONNX 時的 imgsz 一致
+  conf_threshold: 0.45
+  nms_threshold: 0.45
+
+roi:
+  # 多邊形頂點（像素座標，以上面 width x height 為準）。用 tools/pick_roi.py 點選產生。
+  # 留空 [] 代表整個畫面。
+  polygon: []
+  mode: foot                 # foot = 人框底部中心點（腳）在 ROI 內才算；overlap = 人框與 ROI 重疊比例
+  min_overlap: 0.3           # mode: overlap 時使用
+
+trigger:
+  enter_frames: 3            # 連續幾次偵測到有人才算「進入」（避免誤判閃一下就通知）
+  exit_frames: 15            # 連續幾次沒人才算「離開」（離開後再進來才會再通知）
+  cooldown_sec: 60           # 兩次通知之間最少間隔秒數（節省 LINE 每月免費則數）
+  gather_sec: 5              # 第一個人進來後繼續算幾秒（同時進、陸續進都算），時間到傳一則總人數；0 = 立刻傳
+  leave_frames: 2            # 人數連續幾次變少才算有人離開（避免漏框一張就被當成「又進來一個人」）
+
+alert:
+  message: "⚠️ 偵測到有人進入監控區域（{count} 人）\n時間：{time}"
+  save_snapshot: true        # 觸發時把標註後的畫面存到 snapshot_dir
+  snapshot_dir: snapshots
+  attach_image: false        # true = LINE 附上截圖：每一波進來的人一張，最多 4 張，仍只算 1 則（需 IMGBB_API_KEY）
+  image_expiration_sec: 604800  # 截圖在 imgbb 上幾秒後自動刪除（604800 = 7 天；0 = 永久）

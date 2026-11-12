@@ -1,0 +1,20 @@
+# systemd unit：開機自動啟動、當掉自動重啟。
+# 安裝（路徑與使用者請依實際情況修改）：
+#   sudo cp deploy/kneo-roi-alert.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kneo-roi-alert
+#   journalctl -u kneo-roi-alert -f      # 看 log
+[Unit]
+Description=Kneo Pi ROI person-entry LINE alert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/kneo-roi-line-alert
+ExecStart=/home/pi/kneo-roi-line-alert/.venv/bin/python -m kneo_alert
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
