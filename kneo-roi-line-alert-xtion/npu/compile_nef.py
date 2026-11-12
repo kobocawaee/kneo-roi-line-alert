@@ -1,9 +1,11 @@
 """Quantize + compile the cut YOLOv8 (person) and UltraFace (face) models into ONE KL730 NEF.
 
-Runs INSIDE the Kneron toolchain Docker image (tested with kneron/toolchain v0.33.1):
+Runs INSIDE the Kneron toolchain Docker image. Use kneron/toolchain:v0.25.0: the KNEO Pi KL730
+firmware (2.0.0) only runs multi-model NEFs from v0.25/v0.26; with v0.33.1 the second model hangs
+the NPU (and can reboot the board). The conda env must be on PATH (the compiler calls `python`):
 
-    docker run --rm -v <work>:/data kneron/toolchain:latest \
-        /workspace/miniconda/envs/onnx1.13/bin/python /data/compile_nef.py --work /data
+    docker run --rm -v <work>:/data kneron/toolchain:v0.25.0 bash -c \
+        'export PATH=/workspace/miniconda/envs/onnx1.13/bin:$PATH; python /data/compile_nef.py --work /data'
 
 <work> must contain:
     yolov8n_320_cut.onnx, ultraface_320_cut.onnx   (from npu/cut_*.py)

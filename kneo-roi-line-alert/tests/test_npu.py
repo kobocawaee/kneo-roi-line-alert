@@ -84,3 +84,118 @@ def test_has_face_requires_face_in_upper_half():
     assert not has_face(person, [Detection(130, 300, 170, 340, 0.9)])   # lower half
     assert not has_face(person, [Detection(300, 110, 340, 160, 0.9)])   # outside the box
     assert not has_face(person, [])
+
+
+def test_nef_toolchain_version_is_read_from_file(tmp_path):
+    from kneo_alert.npu_detector import MAX_MULTI_MODEL_TOOLCHAIN, nef_toolchain_version
+    new = tmp_path / "new.nef"
+    new.write_bytes(b"\x00\x01junk kneron/toolchain:v0.33.1\x00more")
+    old = tmp_path / "old.nef"
+    old.write_bytes(b"xx kneron/toolchain:v0.25.0_3 yy")
+    none = tmp_path / "none.nef"
+    none.write_bytes(b"no version here")
+    assert nef_toolchain_version(str(new)) == (0, 33) > MAX_MULTI_MODEL_TOOLCHAIN
+    assert nef_toolchain_version(str(old)) == (0, 25) <= MAX_MULTI_MODEL_TOOLCHAIN
+    assert nef_toolchain_version(str(none)) is None
+
+
+def test_face_failure_falls_back_to_persons_only():
+    from kneo_alert.config import DetectorConfig
+    from kneo_alert.npu_detector import TwoModelDetector
+
+    det = TwoModelDetector.__new__(TwoModelDetector)
+    det.cfg = DetectorConfig(type="cut_onnx", require_face=True)
+    det.face_enabled = True
+    det.last_faces = []
+    person = Detection(10, 10, 100, 300, 0.9)
+    det.detect_persons = lambda frame: [person]
+
+    def boom(frame):
+        raise RuntimeError("KP_FW_INFERENCE_TIMEOUT_103")
+    det.detect_faces = boom
+    frame = np.zeros((480, 640, 3), np.uint8)
+    assert det.detect(frame) == [person]      # person still counted
+    assert det.face_enabled is False           # face check switched off, no more NPU calls
+    assert det.detect(frame) == [person]
+
+
+def _run_visit(tmp_path, face_at, seconds=10, fps=10):
+    """One person stands in the ROI the whole time; face_at(t) says if their face is visible."""
+    import cv2
+    from pathlib import Path
+
+    from kneo_alert import app
+    from kneo_alert.config import load_config
+
+    vid = tmp_path / "v.avi"
+    w = cv2.VideoWriter(str(vid), cv2.VideoWriter_fourcc(*"MJPG"), fps, (640, 480))
+    for _ in range(seconds * fps):
+        w.write(np.full((480, 640, 3), 60, np.uint8))
+    w.release()
+
+    class FakeTwoModel:
+        face_enabled = True
+        last_faces: list = []
+        i = 0
+
+        def detect(self, frame):
+            FakeTwoModel.i += 1
+            t = FakeTwoModel.i / fps
+            person = Detection(300, 100, 400, 450, 0.9) if 1 <= t < 8 else None
+            FakeTwoModel.last_faces = [Detection(330, 110, 370, 160, 0.9)] if person and face_at(t) else []
+            return [person] if person else []
+
+    orig = app.create_detector
+    app.create_detector = lambda _c: FakeTwoModel()
+    try:
+        cfg = load_config(Path(__file__).parent.parent / "config.example.yaml", "none.env")
+        cfg.camera.source = str(vid)
+        cfg.roi.polygon = [[250, 50], [600, 50], [600, 470], [250, 470]]
+        cfg.roi.mode = "overlap"
+        cfg.alert.save_snapshot = False
+        cfg.path = None
+        return app.run(cfg, dry_run=True)
+    finally:
+        app.create_detector = orig
+
+
+def test_require_face_turning_around_is_still_one_alert(tmp_path, caplog):
+    """Board 2026-11-12: face visible, then turned away for 2 s, then visible again -> was counted
+    as 2 people because faceless frames dropped the person. Now: one person, one alert."""
+    import logging
+    caplog.set_level(logging.INFO)
+    alerts = _run_visit(tmp_path, face_at=lambda t: t < 2.5 or t > 4.5)
+    assert alerts == 1
+    assert "ALERT: 1 person(s)" in caplog.text and "arrived" not in caplog.text
+
+
+def test_require_face_back_to_camera_whole_visit_no_alert(tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    assert _run_visit(tmp_path, face_at=lambda t: False) == 0
+    assert "No face seen during this visit" in caplog.text
+
+
+def test_faceless_visit_does_not_start_cooldown(tmp_path, caplog):
+    """Board 2026-11-13: a back-to-camera visit was skipped, but its cooldown then blocked the
+    real (face-visible) visit 12 s later."""
+    import logging
+    caplog.set_level(logging.INFO)
+    # visit 1 (1-8 s) no face; ROI empty 8-? ; we reuse _run_visit with face only after 9 s won't
+    # work (person leaves at 8 s), so drive the trigger + gate directly:
+    from kneo_alert.config import TriggerConfig
+    from kneo_alert.trigger import EntryTrigger
+
+    clock = type("C", (), {"t": 0.0, "__call__": lambda self: self.t})()
+    t = EntryTrigger(TriggerConfig(enter_frames=2, exit_sec=2, leave_sec=1, gather_sec=3, cooldown_sec=60), clock)
+    fired = []
+    for i in range(400):                      # 0.1 s steps
+        clock.t = i * 0.1
+        count = 1 if (1 <= clock.t < 6 or 12 <= clock.t < 20) else 0
+        r = t.update(count)
+        if r:
+            if clock.t < 10:                  # first visit: nobody showed a face -> skipped
+                t.cancel_cooldown()
+            else:
+                fired.append(round(clock.t))
+    assert fired == [15]                      # second visit alerts despite being < 60 s later

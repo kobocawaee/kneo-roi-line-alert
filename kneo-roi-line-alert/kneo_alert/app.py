@@ -15,6 +15,7 @@ import cv2
 from .camera import open_camera as _open_camera
 from .config import AppConfig, load_config, save_roi_polygon, validate_polygon
 from .detector import create_detector
+from .npu_detector import has_face
 from .notifier import AsyncNotifier, DryRunNotifier, ImgbbUploader, LineMessagingNotifier
 from .roi import Roi
 from .trigger import EntryTrigger
@@ -60,6 +61,7 @@ class DetectionWorker:
         self.notifier, self.snapshot_dir, self.sync = notifier, snapshot_dir, sync
         self.frame_size = frame_size
         self._events: list = []  # one snapshot per arrival event in the current visit
+        self._face_seen = False  # require_face: has anyone in this visit shown a face?
         self.alerts = 0
         self.processed = 0
         self.dets: list = []
@@ -124,6 +126,10 @@ class DetectionWorker:
         self.processed += 1
 
         res = self.trigger.update(len(inside))
+        if res.arrived and self.trigger.total == res.arrived:
+            self._face_seen = False  # a new visit starts
+        if (self.trigger.gathering or res) and any(has_face(p, faces) for p in inside):
+            self._face_seen = True
         if res.arrived:
             snap = (frame.copy() if self.sync else frame, roi, dets, inside, faces)
             if res.same_group and self._events:
@@ -134,6 +140,13 @@ class DetectionWorker:
             else:
                 log.info("More than %d arrival events; extra snapshots not attached", MAX_IMAGES)
         if res:
+            if getattr(self.detector, "face_enabled", False) and not self._face_seen:
+                # require_face: nobody in this visit ever showed a face (back to the camera, or a
+                # person-shaped object). Don't alert.
+                log.info("No face seen during this visit (require_face) — no message sent")
+                self._events = []
+                self.trigger.cancel_cooldown()  # an unsent alert must not block the next real one
+                return
             self._alert(res.count)
 
     def _alert(self, count: int) -> None:

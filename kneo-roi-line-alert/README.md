@@ -135,7 +135,7 @@ LINE 傳圖片必須是公開的 HTTPS 網址，所以截圖會先上傳到 [img
 
 | | CPU（YOLOv8n 640） | **NPU（YOLOv8n 320，NEF）** |
 |---|---|---|
-| 每張耗時（板子實測） | 約 994 ms | **約 55 ms**（含前處理、USB 傳輸、後處理） |
+| 每張耗時（板子實測） | 約 994 ms | **人物約 55 ms**；人物 + 人臉約 67 ms（含前處理、USB 傳輸、後處理） |
 
 ### 設定
 
@@ -145,7 +145,7 @@ detector:
   input_size: 320
   nef_path: models/models_730.nef
   firmware_path: models/kp_firmware.tar
-  require_face: false           # true = 人物框上半部要偵測到臉才算數（見下方）
+  require_face: true            # 這次進入至少看到一張臉才通知（見下方）
 ```
 
 `kp_firmware.tar` 從 Kneron 官方範例複製（每次連線會上傳到 KL730）：
@@ -159,12 +159,22 @@ cp ~/kneopi-examples/ai_application/plus_python/res/firmware/KL730/kp_firmware.t
 
 ### 人臉確認（`require_face: true`）
 
-人物框的**上半部**要偵測到臉才算一個人。可以擋掉沒有臉的人形誤判（掛著的衣服、椅子、立牌背面）。
-**擋不掉人臉照片**，而且**背對鏡頭的人不會被計入**，鏡頭要能拍到走進來的人的正面。
+人數照常計算，但**這次進入的期間（`gather_sec`）內，至少要有一個人的臉被偵測到**
+（人物框上半部出現人臉）才發通知，否則 log 顯示 `No face seen during this visit` 並略過。
+
+- 可以擋掉沒有臉的人形誤判（掛著的衣服、椅子、立牌背面），以及全程背對鏡頭的情況。
+- 中途轉頭、轉身不會被當成「離開又進來」；一群人裡只要有一人露臉，就會照實際人數通知。
+- **擋不掉人臉照片**；鏡頭要能拍到走進來的人的正面。
 
 ### 自己轉 NEF
 
-需要 Docker 與 `kneron/toolchain` 映像檔（v0.33.1 測試過）。在電腦上：
+需要 Docker 與 **`kneron/toolchain:v0.25.0`**。
+
+> ⚠️ **一定要用 v0.25.x**：KNEO Pi 的 KL730 韌體（2.0.0）只相容 v0.25～v0.26 編出的多模型 NEF。
+> 用 v0.33.1 編的 NEF，第一個模型能跑，但**第二個模型會在 NPU 上逾時，甚至讓板子重開機**。
+> 程式啟動時會檢查 NEF 內記錄的 toolchain 版本，太新時會自動停用第二個模型（人臉）。
+
+在電腦上：
 
 ```bash
 # 1. 匯出並切掉後處理（NPU 只跑卷積；sigmoid / softmax / 解碼改在 CPU）
@@ -183,8 +193,8 @@ python npu/cut_ultraface.py version-RFB-320.onnx npu/ultraface_320_cut.onnx
 ```bash
 # 3. 量化 + 兩個模型編進同一個 NEF。<work> 放：兩個 *_cut.onnx、kneo_alert/yolo_post.py、
 #    kneo_alert/face_post.py、npu/compile_nef.py、calib/*.jpg（路徑請用英文）
-docker run --rm -v <work>:/data kneron/toolchain:latest \
-  /workspace/miniconda/envs/onnx1.13/bin/python /data/compile_nef.py --work /data
+docker run --rm -v <work>:/data kneron/toolchain:v0.25.0 bash -c \
+  'export PATH=/workspace/miniconda/envs/onnx1.13/bin:$PATH; python /data/compile_nef.py --work /data'
 # -> <work>/nef/models_730.nef，複製到 models/
 ```
 

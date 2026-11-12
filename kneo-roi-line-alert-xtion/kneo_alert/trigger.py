@@ -60,6 +60,7 @@ class EntryTrigger:
         self._last_seen: float | None = None  # last time anyone was in the ROI
         self._deadline = 0.0
         self._last_alert: float | None = None
+        self._prev_last_alert: float | None = None
         self._dropped_since_arrival = False
 
     def update(self, count_in_roi: int) -> TriggerResult:
@@ -95,6 +96,7 @@ class EntryTrigger:
                 log.info("+%d arrived (total %d)", rise, self.total)
             elif not self.occupied:
                 if self._last_alert is None or now - self._last_alert >= self.cfg.cooldown_sec:
+                    self._prev_last_alert = self._last_alert
                     self._last_alert = now  # cooldown counts from the start of this visit
                     self.gathering = True
                     self._deadline = now + max(0.0, self.cfg.gather_sec)
@@ -122,3 +124,7 @@ class EntryTrigger:
             self.level = 0
             log.info("ROI is empty again — next entry can trigger an alert")
         return res
+
+    def cancel_cooldown(self) -> None:
+        """The visit that just fired was not alerted (e.g. no face seen): don't let it start a cooldown."""
+        self._last_alert = self._prev_last_alert

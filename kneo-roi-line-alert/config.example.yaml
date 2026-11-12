@@ -2,7 +2,7 @@
 # LINE 的 token / 接收者 ID 放在 .env，不要寫在這裡。
 
 camera:
-  source: 0                  # USB webcam 編號（/dev/video0 = 0）；也可填影片檔路徑或 rtsp://... 網址
+  source: auto               # auto = 自動找 USB webcam（板子重開後 /dev/videoN 編號會變）；也可填 /dev/v4l/by-id/...、編號、影片檔或 rtsp://
   width: 640
   height: 480
   process_every_n_frames: 2  # 每 N 張影格做一次偵測，Pi 上可調大以省 CPU

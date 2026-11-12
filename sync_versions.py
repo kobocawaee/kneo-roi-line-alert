@@ -28,6 +28,7 @@ VERSION_SPECIFIC = {
     "deploy/build_openni2.sh",       # Xtion only
     "deploy/check_openni2.py",       # Xtion only
     "tests/test_openni2.py",         # Xtion only
+    "tests/test_camera.py",          # webcam only (camera.source: auto)
     "requirements.txt",              # Xtion adds `openni`
     "config.example.yaml",           # camera.source comments differ
     "README.md",

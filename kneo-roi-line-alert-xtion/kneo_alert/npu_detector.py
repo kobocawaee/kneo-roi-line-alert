@@ -17,6 +17,7 @@ away from the camera are not counted.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import cv2
@@ -30,10 +31,20 @@ from .yolo_post import decode_person
 log = logging.getLogger(__name__)
 
 YOLO_SIZE = 320
+# KNEO Pi KL730 firmware 2.0.0 runs multi-model NEFs from toolchain <= v0.26 (the official
+# examples use v0.25/v0.26). With v0.33.1 the SECOND model in a NEF times out on the NPU and can
+# hang/reboot the board, so we refuse to run it.
+MAX_MULTI_MODEL_TOOLCHAIN = (0, 26)
 # Head output shapes (C, H, W) -> position in the list the decoders expect.
 YOLO_ORDER = [(64, 40, 40), (80, 40, 40), (64, 20, 20), (80, 20, 20), (64, 10, 10), (80, 10, 10)]
 FACE_ORDER = [(6, 30, 40), (12, 30, 40), (4, 15, 20), (8, 15, 20), (4, 8, 10), (8, 8, 10),
               (6, 4, 5), (12, 4, 5)]
+
+
+def nef_toolchain_version(path: str) -> tuple[int, int] | None:
+    """Toolchain version recorded inside a NEF ('kneron/toolchain:vX.Y...'), if present."""
+    m = re.search(rb"kneron/toolchain:v(\d+)\.(\d+)", Path(path).read_bytes())
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def _order_by_shape(outputs: list[np.ndarray], order: list[tuple[int, int, int]]) -> list[np.ndarray]:
@@ -118,12 +129,23 @@ class KneronNpuBackend:
         nef = kp.core.load_model_from_file(device_group=self.dg, file_path=nef_path)
         self.models = {m.id: m for m in nef.models}
         self.convert = {mid: _NpuInputConverter(kp, m.input_nodes[0]) for mid, m in self.models.items()}
-        log.info("KL730 ready on USB port %s; NEF models %s", usb_port_id, sorted(self.models))
+        self.toolchain = nef_toolchain_version(nef_path)
+        # Models after the first one are only safe on this firmware with an older toolchain.
+        self.unsafe_ids: set[int] = set()
+        if len(nef.models) > 1 and self.toolchain and self.toolchain > MAX_MULTI_MODEL_TOOLCHAIN:
+            self.unsafe_ids = {m.id for m in nef.models[1:]}
+            log.error("NEF built with toolchain v%d.%d: model(s) %s would hang the KL730 (firmware supports "
+                      "multi-model NEFs up to v%d.%d). Recompile with kneron/toolchain:v0.25.0.",
+                      *self.toolchain, sorted(self.unsafe_ids), *MAX_MULTI_MODEL_TOOLCHAIN)
+        log.info("KL730 ready on USB port %s; NEF models %s (toolchain %s)", usb_port_id, sorted(self.models),
+                 "v%d.%d" % self.toolchain if self.toolchain else "?")
 
     def run(self, model_id: int, nchw: np.ndarray) -> list[np.ndarray]:
         kp = self.kp
         if model_id not in self.models:
             raise KeyError(f"model id {model_id} not in NEF (has {sorted(self.models)})")
+        if model_id in self.unsafe_ids:
+            raise RuntimeError(f"model {model_id} disabled: NEF toolchain too new for this firmware")
         desc = kp.GenericDataInferenceDescriptor(
             model_id=model_id, inference_number=0,
             input_node_data_list=[kp.GenericInputNodeData(buffer=self.convert[model_id](nchw))])
@@ -160,8 +182,12 @@ class TwoModelDetector(PersonDetector):
     def __init__(self, cfg: DetectorConfig):
         self.cfg = cfg
         self.last_faces: list[Detection] = []
+        self.face_enabled = cfg.require_face
         if cfg.type == "kneron_nef":
             self.backend = KneronNpuBackend(cfg.nef_path, cfg.firmware_path)
+            if self.face_enabled and cfg.face_model_id in self.backend.unsafe_ids:
+                log.error("require_face disabled: face model can't run with this NEF; counting persons only")
+                self.face_enabled = False
             self._run = lambda which, x: self.backend.run(
                 cfg.person_model_id if which == "person" else cfg.face_model_id, x)
         else:  # cut_onnx
@@ -213,13 +239,19 @@ class TwoModelDetector(PersonDetector):
         return out
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
+        """All persons are returned (so turning away doesn't look like leaving); faces found in the
+        frame are left in self.last_faces. The app uses them to require at least one face per visit."""
         persons = self.detect_persons(frame)
-        if not self.cfg.require_face:
+        if not self.face_enabled:
             self.last_faces = []
             return persons
-        faces = self.detect_faces(frame) if persons else []
-        self.last_faces = faces
-        return [p for p in persons if has_face(p, faces)]
+        try:
+            self.last_faces = self.detect_faces(frame) if persons else []
+        except Exception as e:  # noqa: BLE001 - never let the face check take the app down
+            log.error("Face detection failed (%s); require_face disabled, counting persons only", e)
+            self.face_enabled = False
+            self.last_faces = []
+        return persons
 
 
 def has_face(person: Detection, faces: list[Detection]) -> bool:
