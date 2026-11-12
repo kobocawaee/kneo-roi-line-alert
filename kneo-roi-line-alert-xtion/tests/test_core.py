@@ -45,90 +45,95 @@ class FakeClock:
         return self.t
 
 
-def feed(trigger, seq):
-    return [bool(trigger.update(c)) for c in seq]
+def run_seq(t, clock, seq, dt=0.25, t0=0.0):
+    """Feed head-counts at a fixed detection rate (dt seconds apart)."""
+    out = []
+    for i, c in enumerate(seq):
+        clock.t = t0 + i * dt
+        out.append(t.update(c))
+    return out
+
+
+def fired_counts(res):
+    return [r.count for r in res if r]
 
 
 def T(**kw):
     kw.setdefault("gather_sec", 0)
+    kw.setdefault("leave_sec", 1.0)
+    kw.setdefault("exit_sec", 1.0)
     return TriggerConfig(**kw)
 
 
 def test_trigger_requires_consecutive_frames():
-    t = EntryTrigger(T(enter_frames=3, exit_frames=2, cooldown_sec=0), FakeClock())
-    assert feed(t, [1, 0, 1, 1]) == [False] * 4
+    clock = FakeClock()
+    t = EntryTrigger(T(enter_frames=3, cooldown_sec=0), clock)
+    assert [bool(r) for r in run_seq(t, clock, [1, 0, 1, 1])] == [False] * 4
+    clock.t = 1.0
     assert bool(t.update(1)) is True
 
 
 def test_trigger_fires_once_while_occupied():
-    t = EntryTrigger(T(enter_frames=2, exit_frames=3, cooldown_sec=0), FakeClock())
-    fired = feed(t, [1] * 50)
-    assert sum(fired) == 1
-    # brief dropout shorter than exit_frames doesn't re-arm
-    assert sum(feed(t, [0, 0, 1, 1, 1])) == 0
+    clock = FakeClock()
+    t = EntryTrigger(T(enter_frames=2, cooldown_sec=0, exit_sec=1.0), clock)
+    assert len(fired_counts(run_seq(t, clock, [1] * 50))) == 1
+    # dropout shorter than exit_sec (0.5 s) doesn't re-arm
+    assert fired_counts(run_seq(t, clock, [0, 0, 1, 1, 1], t0=clock.t + 0.25)) == []
 
 
 def test_trigger_rearms_after_exit():
-    t = EntryTrigger(T(enter_frames=2, exit_frames=3, cooldown_sec=0), FakeClock())
-    assert sum(feed(t, [1, 1, 0, 0, 0, 1, 1])) == 2
+    clock = FakeClock()
+    t = EntryTrigger(T(enter_frames=2, cooldown_sec=0, exit_sec=1.0), clock)
+    assert len(fired_counts(run_seq(t, clock, [1, 1] + [0] * 6 + [1, 1]))) == 2
 
 
 def test_trigger_cooldown():
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=1, exit_frames=1, cooldown_sec=60), clock)
+    t = EntryTrigger(T(enter_frames=1, cooldown_sec=60, exit_sec=0, leave_sec=0), clock)
     assert t.update(1)
-    t.update(0)
+    clock.t = 1; t.update(0)
     clock.t = 30
     assert not t.update(1)  # in cooldown
-    t.update(0)
+    clock.t = 31; t.update(0)
     clock.t = 61
     assert t.update(1)
+
+
+def test_exit_is_measured_in_seconds_not_frames():
+    """Same 3 s of absence must empty the ROI at 4 or 25 detections per second."""
+    for dt in (0.25, 0.04):
+        clock = FakeClock()
+        t = EntryTrigger(T(enter_frames=2, exit_sec=4.0), clock)
+        n_in, n_out = int(2 / dt), int(3 / dt)
+        run_seq(t, clock, [1] * n_in + [0] * n_out, dt=dt)
+        assert t.occupied, f"emptied too early at dt={dt}"
+        run_seq(t, clock, [0] * int(1.5 / dt), dt=dt, t0=clock.t + dt)
+        assert not t.occupied
 
 
 def test_gather_reports_people_arriving_seconds_apart():
     """User's case: I walk in, my friend follows 2 s later -> one alert saying 2 people."""
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=2, exit_frames=5, cooldown_sec=60, gather_sec=5), clock)
-    results = []
-    for i, count in enumerate([1] * 8 + [2] * 30):  # 4 detections/s; friend appears at 2 s
-        clock.t = i * 0.25
-        results.append(t.update(count))
+    t = EntryTrigger(T(enter_frames=2, cooldown_sec=60, gather_sec=5), clock)
+    results = run_seq(t, clock, [1] * 8 + [2] * 30)  # 4 detections/s; friend appears at 2 s
     fired = [r for r in results if r]
-    assert len(fired) == 1
-    assert fired[0].count == 2
+    assert len(fired) == 1 and fired[0].count == 2
     # alert fires gather_sec after the first person was confirmed (2nd frame, t=0.25)
     assert results.index(fired[0]) == int((0.25 + 5) / 0.25)
 
 
 def test_gather_ignores_single_frame_spike():
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=3, exit_frames=5, gather_sec=2), clock)
-    seq = [1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1]  # one bogus frame with 3 boxes
-    fired = []
-    for i, c in enumerate(seq):
-        clock.t = i * 0.25
-        r = t.update(c)
-        if r:
-            fired.append(r.count)
-    assert fired == [1]
-
-
-def run_seq(t, clock, seq, dt=0.25):
-    out = []
-    for i, c in enumerate(seq):
-        clock.t = i * dt
-        out.append(t.update(c))
-    return out
+    t = EntryTrigger(T(enter_frames=3, gather_sec=2), clock)
+    assert fired_counts(run_seq(t, clock, [1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1])) == [1]
 
 
 def test_door_one_after_another_counts_both():
     """Narrow door: I walk through the ROI and leave it, then my friend walks in."""
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=2, exit_frames=15, gather_sec=5), clock)
-    seq = [1] * 6 + [0] * 3 + [1] * 6 + [0] * 10  # me (1.5 s), gap (0.75 s), friend
-    res = run_seq(t, clock, seq)
-    fired = [r for r in res if r]
-    assert len(fired) == 1 and fired[0].count == 2
+    t = EntryTrigger(T(enter_frames=2, exit_sec=4, gather_sec=5), clock)
+    res = run_seq(t, clock, [1] * 6 + [0] * 6 + [1] * 6 + [0] * 10)  # me 1.5 s, gap 1.5 s, friend
+    assert fired_counts(res) == [2]
     events = [(r.arrived, r.same_group) for r in res if r.arrived]
     assert events == [(1, False), (1, False)]  # two separate arrival events -> two pictures
 
@@ -136,27 +141,42 @@ def test_door_one_after_another_counts_both():
 def test_group_then_latecomer():
     """Two walk in together, a third comes later after they left the ROI."""
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=2, exit_frames=15, gather_sec=5), clock)
-    seq = [2] * 6 + [0] * 3 + [1] * 6 + [0] * 10
-    res = run_seq(t, clock, seq)
-    events = [r.arrived for r in res if r.arrived]
-    assert events == [2, 1]
-    assert [r.count for r in res if r] == [3]
+    t = EntryTrigger(T(enter_frames=2, exit_sec=4, gather_sec=5), clock)
+    res = run_seq(t, clock, [2] * 6 + [0] * 6 + [1] * 6 + [0] * 10)
+    assert [r.arrived for r in res if r.arrived] == [2, 1]
+    assert fired_counts(res) == [3]
 
 
 def test_joining_people_still_inside_is_same_group():
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=2, exit_frames=15, gather_sec=5), clock)
+    t = EntryTrigger(T(enter_frames=2, exit_sec=4, gather_sec=5), clock)
     res = run_seq(t, clock, [1] * 4 + [2] * 8)
-    events = [(r.arrived, r.same_group) for r in res if r.arrived]
-    assert events == [(1, False), (1, True)]  # second joined while first still there -> one picture
+    assert [(r.arrived, r.same_group) for r in res if r.arrived] == [(1, False), (1, True)]
 
 
 def test_single_missed_detection_is_not_a_new_arrival():
     clock = FakeClock()
-    t = EntryTrigger(T(enter_frames=2, exit_frames=15, leave_frames=2, gather_sec=5), clock)
-    res = run_seq(t, clock, [1, 1, 1, 0, 1, 1, 1, 1] + [1] * 20)
-    assert [r.count for r in res if r] == [1]
+    t = EntryTrigger(T(enter_frames=2, exit_sec=4, gather_sec=5), clock)
+    assert fired_counts(run_seq(t, clock, [1, 1, 1, 0, 1, 1, 1, 1] + [1] * 20)) == [1]
+
+
+def test_flicker_at_roi_edge_on_fast_npu_is_one_person():
+    """Board bug 2026-11-12: one person half in the ROI at 25 detections/s was counted 3 times,
+    because a 2-frame 'leave' window was only 0.08 s long. Flicker shorter than leave_sec
+    must not create new arrivals."""
+    clock = FakeClock()
+    t = EntryTrigger(T(enter_frames=3, exit_sec=4, leave_sec=1.0, gather_sec=5), clock)
+    pattern = ([1] * 6 + [0] * 4) * 15  # in/out of the ROI edge every ~0.4 s for 6 s
+    res = run_seq(t, clock, pattern, dt=0.04)
+    assert fired_counts(res) == [1]
+    assert sum(r.arrived for r in res) == 1
+
+
+def test_old_frame_settings_still_load_with_warning(tmp_path, caplog):
+    (tmp_path / "c.yaml").write_text("trigger:\n  exit_frames: 72\n  leave_frames: 2\n", encoding="utf-8")
+    cfg = load_config(tmp_path / "c.yaml", tmp_path / "none.env")
+    assert cfg.trigger.exit_sec == 4.0 and cfg.trigger.leave_sec == 1.0
+    assert "exit_frames is no longer used" in caplog.text
 
 
 # ---------- YOLO postprocess ----------

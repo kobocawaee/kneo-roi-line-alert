@@ -3,8 +3,10 @@
 Per processed frame we get the number of people in the ROI. We keep a debounced *level*:
   - it goes UP to n only when the last `enter_frames` counts are all >= n
     (so a one-frame false positive never counts as a person),
-  - it goes DOWN to n only when the last `leave_frames` counts are all <= n
-    (so a single missed detection doesn't look like someone left and came back).
+  - it goes DOWN to n only when every count in the last `leave_sec` seconds is <= n
+    (so a box flickering at the ROI edge doesn't look like someone left and came back).
+Leaving/emptying are measured in SECONDS, not frames, so behaviour is the same whether the
+detector runs 4 times a second (CPU) or 25 times a second (NPU).
 
 Every rise of the level is an *arrival event* of (rise) people. Two people walking in
 together are one event of 2; people coming through a narrow door one after another are
@@ -13,7 +15,7 @@ several events of 1. All arrivals are added up.
   EMPTY --(level rises)--> start gathering (unless in cooldown)
   while gathering: every rise adds people to the total (caller may keep a snapshot per event)
   gather_sec after the start: fire ONE alert with the total
-  OCCUPIED --(exit_frames consecutive empty frames)--> EMPTY
+  OCCUPIED --(nobody in the ROI for exit_sec seconds)--> EMPTY
 
 People who arrive after the gather window closes, while the ROI is still occupied, do not
 trigger a new alert. The detector can't tell people apart, so the same person stepping out
@@ -53,8 +55,9 @@ class EntryTrigger:
         self.total = 0
         self.level = 0
         self._up: deque[int] = deque(maxlen=max(1, cfg.enter_frames))
-        self._down: deque[int] = deque(maxlen=max(1, cfg.leave_frames))
-        self._miss_streak = 0
+        self._recent: deque[tuple[float, int]] = deque()  # (time, count) within leave_sec
+        self._started: float | None = None
+        self._last_seen: float | None = None  # last time anyone was in the ROI
         self._deadline = 0.0
         self._last_alert: float | None = None
         self._dropped_since_arrival = False
@@ -64,17 +67,24 @@ class EntryTrigger:
         now = self.clock()
         res = TriggerResult()
         self._up.append(count_in_roi)
-        self._down.append(count_in_roi)
-        self._miss_streak = self._miss_streak + 1 if count_in_roi == 0 else 0
+        if self._started is None:
+            self._started = now
+        self._recent.append((now, count_in_roi))
+        while self._recent and self._recent[0][0] < now - self.cfg.leave_sec:
+            self._recent.popleft()
+        if count_in_roi > 0:
+            self._last_seen = now
 
         # --- debounced level ---
         rise = 0
         if len(self._up) == self._up.maxlen and min(self._up) > self.level:
             rise = min(self._up) - self.level
             self.level += rise
-        elif len(self._down) == self._down.maxlen and max(self._down) < self.level:
-            self.level = max(self._down)
-            self._dropped_since_arrival = True
+        elif now - self._started >= self.cfg.leave_sec:
+            recent_max = max(c for _, c in self._recent)
+            if recent_max < self.level:
+                self.level = recent_max
+                self._dropped_since_arrival = True
 
         # --- sessions ---
         if rise:
@@ -106,7 +116,8 @@ class EntryTrigger:
             res.fire = True
             res.count = self.total
 
-        if self.occupied and self._miss_streak >= self.cfg.exit_frames:
+        if (self.occupied and count_in_roi == 0
+                and (self._last_seen is None or now - self._last_seen >= self.cfg.exit_sec)):
             self.occupied = False
             self.level = 0
             log.info("ROI is empty again — next entry can trigger an alert")

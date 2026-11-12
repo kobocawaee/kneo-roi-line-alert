@@ -11,3 +11,7 @@ __pycache__/
 board_config.yaml
 camera_test.jpg
 alert_*.jpg
+calib/
+npu/*.onnx
+npu/out/
+*.nef

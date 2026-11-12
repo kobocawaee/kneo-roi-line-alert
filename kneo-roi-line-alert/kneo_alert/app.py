@@ -33,8 +33,10 @@ def format_message(template: str, count: int) -> str:
     return template.format(count=count, time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
-def annotate(frame, roi: Roi, dets, inside) -> None:
+def annotate(frame, roi: Roi, dets, inside, faces=()) -> None:
     roi.draw(frame)
+    for f in faces:  # face check (detector.require_face): blue boxes
+        cv2.rectangle(frame, (f.x1, f.y1), (f.x2, f.y2), (255, 128, 0), 2)
     inside_ids = {id(d) for d in inside}
     for d in dets:
         color = (0, 0, 255) if id(d) in inside_ids else (0, 255, 0)
@@ -62,6 +64,7 @@ class DetectionWorker:
         self.processed = 0
         self.dets: list = []
         self.inside: list = []
+        self.faces: list = []
         self._lock = threading.Lock()
         self._pending = None
         self._wake = threading.Event()
@@ -84,7 +87,7 @@ class DetectionWorker:
 
     def latest(self):
         with self._lock:
-            return self.dets, self.inside
+            return self.dets, self.inside, self.faces
 
     def close(self) -> None:
         self._stop = True
@@ -114,14 +117,15 @@ class DetectionWorker:
     def _process(self, frame) -> None:
         roi = self.roi  # may be swapped by set_roi() from another thread
         dets = self.detector.detect(frame)
+        faces = list(getattr(self.detector, "last_faces", []))
         inside = roi.filter(dets)
         with self._lock:
-            self.dets, self.inside = dets, inside
+            self.dets, self.inside, self.faces = dets, inside, faces
         self.processed += 1
 
         res = self.trigger.update(len(inside))
         if res.arrived:
-            snap = (frame.copy() if self.sync else frame, roi, dets, inside)
+            snap = (frame.copy() if self.sync else frame, roi, dets, inside, faces)
             if res.same_group and self._events:
                 # More people joined those still in the ROI: one picture of the whole group.
                 self._events[-1] = snap
@@ -139,9 +143,9 @@ class DetectionWorker:
         jpegs: list[bytes] = []
         if self.snapshot_dir is not None or self.cfg.alert.attach_image:
             stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
-            for i, (frame, roi, dets, inside) in enumerate(self._events, 1):
+            for i, (frame, roi, dets, inside, faces) in enumerate(self._events, 1):
                 snap = frame.copy()
-                annotate(snap, roi, dets, inside)
+                annotate(snap, roi, dets, inside, faces)
                 ok, buf = cv2.imencode(".jpg", snap, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if not ok:
                     continue
@@ -248,8 +252,8 @@ def run(cfg: AppConfig, dry_run: bool = False, show: bool = False, max_frames: i
                 now = time.monotonic()
                 if now - fps_t0 >= 1.0:
                     fps, fps_t0, fps_n = fps_n / (now - fps_t0), now, 0
-                dets, inside = worker.latest()
-                annotate(frame, worker.roi, dets, inside)
+                dets, inside, faces = worker.latest()
+                annotate(frame, worker.roi, dets, inside, faces)
                 status = (f"COUNTING {trigger.total}" if trigger.gathering
                           else "OCCUPIED" if trigger.occupied else "empty")
                 cv2.putText(frame, f"ROI: {len(inside)} ({status})  {fps:.0f} fps", (10, 25),

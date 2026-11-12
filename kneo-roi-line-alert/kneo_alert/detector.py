@@ -135,4 +135,8 @@ def create_detector(cfg: DetectorConfig) -> PersonDetector:
         return HogPersonDetector(cfg)
     if cfg.type == "yolo_onnx":
         return YoloOnnxDetector(cfg)
-    raise ValueError(f"Unknown detector.type: {cfg.type!r} (use 'yolo_onnx' or 'hog')")
+    if cfg.type in ("kneron_nef", "cut_onnx"):
+        from .npu_detector import TwoModelDetector
+        return TwoModelDetector(cfg)
+    raise ValueError(f"Unknown detector.type: {cfg.type!r} "
+                     "(use 'kneron_nef', 'cut_onnx', 'yolo_onnx' or 'hog')")

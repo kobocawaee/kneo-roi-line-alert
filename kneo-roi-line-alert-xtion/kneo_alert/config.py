@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -14,11 +15,21 @@ from .camera import CameraConfig  # camera settings live with the camera code (d
 
 @dataclass
 class DetectorConfig:
-    type: str = "hog"  # "yolo_onnx" or "hog"
+    # "kneron_nef" (KL730 NPU), "cut_onnx" (same models on CPU, for PC tests), "yolo_onnx" or "hog"
+    type: str = "hog"
     model_path: str = "models/yolov8n.onnx"
     input_size: int = 640
     conf_threshold: float = 0.45
     nms_threshold: float = 0.45
+    # --- kneron_nef / cut_onnx ---
+    nef_path: str = "models/models_730.nef"
+    firmware_path: str = "models/kp_firmware.tar"
+    person_model_id: int = 32769
+    face_model_id: int = 32770
+    person_onnx: str = "npu/yolov8n_320_cut.onnx"   # cut_onnx only
+    face_onnx: str = "npu/ultraface_320_cut.onnx"   # cut_onnx only
+    require_face: bool = False  # count a person only if a face is seen in the upper half of the box
+    face_conf: float = 0.7
 
 
 @dataclass
@@ -33,8 +44,10 @@ class RoiConfig:
 @dataclass
 class TriggerConfig:
     enter_frames: int = 3  # consecutive detections with someone in ROI before it counts as entered
-    exit_frames: int = 15  # consecutive empty detections before ROI counts as empty again
-    leave_frames: int = 2  # detections with fewer people before someone counts as having left
+    exit_sec: float = 4.0   # nobody in the ROI for this long -> it counts as empty again
+    leave_sec: float = 1.0  # fewer people for this long -> someone really left (not a flicker)
+    exit_frames: int | None = None   # deprecated (frame-based, depended on detector speed); ignored
+    leave_frames: int | None = None  # deprecated; ignored
     cooldown_sec: float = 60.0
     # After the first person enters, keep counting arrivals (together or one after another)
     # for this long, then send ONE message with the total. 0 = alert immediately.
@@ -124,6 +137,12 @@ def load_config(path: str | Path = "config.yaml", env_file: str | Path = ".env")
     # A numeric string like "0" means a local camera index.
     if isinstance(cfg.camera.source, str) and cfg.camera.source.isdigit():
         cfg.camera.source = int(cfg.camera.source)
+
+    for old, new in (("exit_frames", "exit_sec"), ("leave_frames", "leave_sec")):
+        if getattr(cfg.trigger, old) is not None:
+            logging.getLogger(__name__).warning(
+                "trigger.%s is no longer used (it depended on detector speed); using trigger.%s = %s s",
+                old, new, getattr(cfg.trigger, new))
 
     if cfg.roi.polygon:
         cfg.roi.polygon = validate_polygon(cfg.roi.polygon)
