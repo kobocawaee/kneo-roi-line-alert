@@ -7,12 +7,18 @@ the NPU (and can reboot the board). The conda env must be on PATH (the compiler 
     docker run --rm -v <work>:/data kneron/toolchain:v0.25.0 bash -c \
         'export PATH=/workspace/miniconda/envs/onnx1.13/bin:$PATH; python /data/compile_nef.py --work /data'
 
-<work> must contain:
-    yolov8n_320_cut.onnx, ultraface_320_cut.onnx   (from npu/cut_*.py)
-    yolo_post.py, face_post.py                      (copied from kneo_alert/, used for the check)
-    calib/*.jpg                                     (50-100 frames from the real camera)
-Output: <work>/out/models_730.nef  (model id 32769 = person, 32770 = face)
-plus a float-vs-NPU comparison printed at the end.
+<work> is either the PROJECT folder itself (simplest; run from it in PowerShell):
+
+    docker run --rm -v "${PWD}:/data" -w /data kneron/toolchain:v0.25.0 bash -c \
+        'export PATH=/workspace/miniconda/envs/onnx1.13/bin:$PATH; python npu/compile_nef.py'
+
+  using npu/yolov8n_320_cut.onnx, npu/ultraface_320_cut.onnx, kneo_alert/*_post.py, calib/*.jpg
+  -> npu/build/nef/models_730.nef
+
+or a flat folder holding yolov8n_320_cut.onnx, ultraface_320_cut.onnx, yolo_post.py,
+face_post.py and calib/*.jpg  -> <work>/nef/models_730.nef.
+Model ids in the NEF: 32769 = person, 32770 = face. A float-vs-quantized score comparison
+is printed at the end.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import ktc
 
 PLATFORM = "730"
 PERSON_ID, FACE_ID = 32769, 32770
+YOLO_CUT = FACE_CUT = ""  # set in main()
 YOLO_IN, FACE_IN = "images", "input"
 
 
@@ -67,26 +74,37 @@ def optimize(path: str, dst: str) -> tuple[str, str]:
     return dst, m.graph.input[0].name
 
 
+def pick(*paths: str) -> str:
+    for p in paths:
+        if os.path.isfile(p):
+            return p
+    sys.exit(f"Not found: {paths[0]} (also looked in {', '.join(paths[1:])}). Run npu/cut_*.py first.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--work", default="/data")
+    ap.add_argument("--work", default=os.getcwd())
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--max-calib", type=int, default=100)
     args = ap.parse_args()
-    work = args.work
+    work = os.path.abspath(args.work)
+    project = os.path.isdir(os.path.join(work, "kneo_alert"))
     sys.path.insert(0, work)
-    out = os.path.join(work, "out")
+    sys.path.insert(0, os.path.join(work, "kneo_alert"))   # yolo_post / face_post for the check
+    root = os.path.join(work, "npu", "build") if project else work
+    out = os.path.join(root, "out")
     os.makedirs(out, exist_ok=True)
+    global YOLO_CUT, FACE_CUT
+    YOLO_CUT = pick(os.path.join(work, "npu", "yolov8n_320_cut.onnx"), os.path.join(work, "yolov8n_320_cut.onnx"))
+    FACE_CUT = pick(os.path.join(work, "npu", "ultraface_320_cut.onnx"), os.path.join(work, "ultraface_320_cut.onnx"))
 
     calib = sorted(glob.glob(os.path.join(work, "calib", "*.jpg")))[: args.max_calib]
     if len(calib) < 10:
         sys.exit(f"Need at least 10 calibration images in {work}/calib (found {len(calib)})")
     print(f"[calib] {len(calib)} images")
 
-    person_onnx, person_in = optimize(os.path.join(work, "yolov8n_320_cut.onnx"),
-                                      os.path.join(out, "person_opt.onnx"))
-    face_onnx, face_in = optimize(os.path.join(work, "ultraface_320_cut.onnx"),
-                                  os.path.join(out, "face_opt.onnx"))
+    person_onnx, person_in = optimize(YOLO_CUT, os.path.join(out, "person_opt.onnx"))
+    face_onnx, face_in = optimize(FACE_CUT, os.path.join(out, "face_opt.onnx"))
     print(f"[optimize] person input={person_in!r}  face input={face_in!r}")
     km_person = ktc.ModelConfig(PERSON_ID, "0001", PLATFORM, onnx_path=person_onnx)
     km_face = ktc.ModelConfig(FACE_ID, "0001", PLATFORM, onnx_path=face_onnx)
@@ -103,7 +121,7 @@ def main() -> None:
                      threads=args.threads)
 
     # The toolchain may clean its output folders later (compile / simulator), so keep copies.
-    bie_dir = os.path.join(work, "bie")
+    bie_dir = os.path.join(root, "bie")
     os.makedirs(bie_dir, exist_ok=True)
     person_bie = shutil.copy(person_bie, os.path.join(bie_dir, "person.bie"))
     face_bie = shutil.copy(face_bie, os.path.join(bie_dir, "face.bie"))
@@ -112,7 +130,7 @@ def main() -> None:
     nef = ktc.compile([km_person, km_face])
     # Keep the result in its own folder: the E2E simulator unpacks NEFs next to the file
     # and can wipe that folder if it crashes.
-    nef_dir = os.path.join(work, "nef")
+    nef_dir = os.path.join(root, "nef")
     os.makedirs(nef_dir, exist_ok=True)
     dst = os.path.join(nef_dir, "models_730.nef")
     shutil.copy(nef, dst)
@@ -160,12 +178,24 @@ def check(work: str, nef: str, images: list[str], person_in: str, face_in: str, 
         o = by_shape(outs, face_order)
         return [(o[2 * k], o[2 * k + 1]) for k in range(4)]
 
-    print("\n[check] float ONNX vs KL730 NEF (hardware simulator)")
+    # Float reference: onnxruntime when available (the toolchain's float simulator gave wrong
+    # person scores in our tests), else the toolchain's own float inference.
+    try:
+        import onnxruntime as ort
+        sess = {YOLO_CUT: ort.InferenceSession(YOLO_CUT), FACE_CUT: ort.InferenceSession(FACE_CUT)}
+
+        def floatrun(path, x, name):
+            return sess[path].run(None, {sess[path].get_inputs()[0].name: x.astype(np.float32)})
+    except ImportError:
+        def floatrun(path, x, name):
+            return ktc.kneron_inference([x], onnx_file=path, input_names=[name])
+
+    print("\n[check] float ONNX vs quantized KL730 model (person / face max score per image)")
     for p in images:
         yi, fi = yolo_input(p), face_input(p)
-        yf = ktc.kneron_inference([yi], onnx_file=os.path.join(work, "yolov8n_320_cut.onnx"), input_names=[YOLO_IN])
+        yf = floatrun(YOLO_CUT, yi, YOLO_IN)
         yn = npu(yi, PERSON_ID, person_in)
-        ff = ktc.kneron_inference([fi], onnx_file=os.path.join(work, "ultraface_320_cut.onnx"), input_names=[FACE_IN])
+        ff = floatrun(FACE_CUT, fi, FACE_IN)
         fn = npu(fi, FACE_ID, face_in)
         if p == images[0]:
             print(f"  [{mode['kind']}] person output shapes:", [np.asarray(o).shape for o in yn])

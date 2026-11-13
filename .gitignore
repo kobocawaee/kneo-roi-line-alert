@@ -27,3 +27,4 @@ npu/out/
 
 # Handouts / course documents (kept locally, not in the repo)
 *.pdf
+npu/build/
