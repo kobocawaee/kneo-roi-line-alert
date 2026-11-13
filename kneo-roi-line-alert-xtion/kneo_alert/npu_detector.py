@@ -31,10 +31,12 @@ from .yolo_post import decode_person
 log = logging.getLogger(__name__)
 
 YOLO_SIZE = 320
-# KNEO Pi KL730 firmware 2.0.0 runs multi-model NEFs from toolchain <= v0.26 (the official
-# examples use v0.25/v0.26). With v0.33.1 the SECOND model in a NEF times out on the NPU and can
-# hang/reboot the board, so we refuse to run it.
-MAX_MULTI_MODEL_TOOLCHAIN = (0, 26)
+# Multi-model NEFs vs the KNEO Pi KL730 firmware (2.0.0.608), as tested on our board:
+#   v0.25.0  both models run (what we ship; the official examples use v0.25/v0.26)
+#   v0.33.1  the SECOND model times out on the NPU and can hang/reboot the board -> refused
+#   v0.27-v0.32 untested here (a v0.31.0 two-model NEF is reported to work on another KNEO Pi)
+KNOWN_BAD_MULTI_MODEL_TOOLCHAIN = (0, 33)   # this version and newer: second model is not run
+LAST_TESTED_GOOD_TOOLCHAIN = (0, 26)        # newer than this (but not known bad): warn only
 # Head output shapes (C, H, W) -> position in the list the decoders expect.
 YOLO_ORDER = [(64, 40, 40), (80, 40, 40), (64, 20, 20), (80, 20, 20), (64, 10, 10), (80, 10, 10)]
 FACE_ORDER = [(6, 30, 40), (12, 30, 40), (4, 15, 20), (8, 15, 20), (4, 8, 10), (8, 8, 10),
@@ -132,11 +134,16 @@ class KneronNpuBackend:
         self.toolchain = nef_toolchain_version(nef_path)
         # Models after the first one are only safe on this firmware with an older toolchain.
         self.unsafe_ids: set[int] = set()
-        if len(nef.models) > 1 and self.toolchain and self.toolchain > MAX_MULTI_MODEL_TOOLCHAIN:
-            self.unsafe_ids = {m.id for m in nef.models[1:]}
-            log.error("NEF built with toolchain v%d.%d: model(s) %s would hang the KL730 (firmware supports "
-                      "multi-model NEFs up to v%d.%d). Recompile with kneron/toolchain:v0.25.0.",
-                      *self.toolchain, sorted(self.unsafe_ids), *MAX_MULTI_MODEL_TOOLCHAIN)
+        if len(nef.models) > 1 and self.toolchain:
+            if self.toolchain >= KNOWN_BAD_MULTI_MODEL_TOOLCHAIN:
+                self.unsafe_ids = {m.id for m in nef.models[1:]}
+                log.error("NEF built with toolchain v%d.%d: model(s) %s hang the KL730 with this firmware "
+                          "(tested with v0.33.1). Recompile with kneron/toolchain:v0.25.0.",
+                          *self.toolchain, sorted(self.unsafe_ids))
+            elif self.toolchain > LAST_TESTED_GOOD_TOOLCHAIN:
+                log.warning("NEF built with toolchain v%d.%d: multi-model NEFs from this version are untested "
+                            "on this board (v0.25.0 works, v0.33.1 hangs). If inference times out, "
+                            "recompile with kneron/toolchain:v0.25.0.", *self.toolchain)
         log.info("KL730 ready on USB port %s; NEF models %s (toolchain %s)", usb_port_id, sorted(self.models),
                  "v%d.%d" % self.toolchain if self.toolchain else "?")
 

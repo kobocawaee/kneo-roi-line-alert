@@ -87,15 +87,18 @@ def test_has_face_requires_face_in_upper_half():
 
 
 def test_nef_toolchain_version_is_read_from_file(tmp_path):
-    from kneo_alert.npu_detector import MAX_MULTI_MODEL_TOOLCHAIN, nef_toolchain_version
+    from kneo_alert.npu_detector import (KNOWN_BAD_MULTI_MODEL_TOOLCHAIN, LAST_TESTED_GOOD_TOOLCHAIN,
+                                         nef_toolchain_version)
     new = tmp_path / "new.nef"
     new.write_bytes(b"\x00\x01junk kneron/toolchain:v0.33.1\x00more")
     old = tmp_path / "old.nef"
     old.write_bytes(b"xx kneron/toolchain:v0.25.0_3 yy")
     none = tmp_path / "none.nef"
     none.write_bytes(b"no version here")
-    assert nef_toolchain_version(str(new)) == (0, 33) > MAX_MULTI_MODEL_TOOLCHAIN
-    assert nef_toolchain_version(str(old)) == (0, 25) <= MAX_MULTI_MODEL_TOOLCHAIN
+    assert nef_toolchain_version(str(new)) == (0, 33) >= KNOWN_BAD_MULTI_MODEL_TOOLCHAIN
+    assert nef_toolchain_version(str(old)) == (0, 25) <= LAST_TESTED_GOOD_TOOLCHAIN
+    # v0.31 (reported working elsewhere) is not blocked, only warned about
+    assert LAST_TESTED_GOOD_TOOLCHAIN < (0, 31) < KNOWN_BAD_MULTI_MODEL_TOOLCHAIN
     assert nef_toolchain_version(str(none)) is None
 
 

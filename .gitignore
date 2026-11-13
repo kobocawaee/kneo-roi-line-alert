@@ -24,3 +24,6 @@ calib/
 npu/*.onnx
 npu/out/
 *.nef
+
+# Handouts / course documents (kept locally, not in the repo)
+*.pdf
